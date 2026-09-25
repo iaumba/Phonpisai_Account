@@ -18,17 +18,31 @@ function sendYesterdayLineReport() {
     return;
   }
 
-  // 1. คำนวณวันที่ของเมื่อวาน
-  const yesterday = new Date();
-  yesterday.setDate(yesterday.getDate() - 1);
-  
+  // 1. คำนวณวันที่ของ "เมื่อวาน" ตามเขตเวลาไทย (Asia/Bangkok)
+  //    * ไม่ใช้ new Date().setDate(-1) เพราะเป็นการลบวันตาม UTC จะเพี้ยนเมื่อ Trigger รันช่วงเช้ามืด
+  //    * อ่านวันปัจจุบันตามเวลาไทยก่อน แล้วค่อยลบ 1 วัน (คำนวณแบบ UTC -> แปลงให้เป็นวันไทย)
+  const todayParts = Utilities.formatDate(new Date(), 'Asia/Bangkok', 'yyyy|M|d').split('|');
+  const todayBkk = new Date(Date.UTC(
+    parseInt(todayParts[0], 10),
+    parseInt(todayParts[1], 10) - 1,
+    parseInt(todayParts[2], 10)
+  ));
+  const yesterday = new Date(todayBkk.getTime() - 24 * 60 * 60 * 1000);
+
   const targetDayMonth = Utilities.formatDate(yesterday, 'Asia/Bangkok', 'd/M');
   const targetDayMonthFull = Utilities.formatDate(yesterday, 'Asia/Bangkok', 'dd/MM');
   const displayYesterday = Utilities.formatDate(yesterday, 'Asia/Bangkok', 'd/M/yyyy');
+  const targetMonthAbbr = Utilities.formatDate(yesterday, 'Asia/Bangkok', 'MMM', 'th_TH'); // เช่น ก.ย.
 
-  // 2. ดึงข้อมูลจากสเปรดชีต
+  // 2. หาชีตประจำเดือนเป้าหมาย: จับคู่ชื่อชีต (เช่น "ก.ย.69") กับเดือนของวันเมื่อวาน
+  //    * Trigger รันเบื้องหลังมักไม่มี "active sheet" (getActiveSheet() คืนชีตแรก/ว่าง)
+  //    * ดังนั้นระบุชีตให้ชัดเจนแทนการพึ่ง getActiveSheet()
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sheet = ss.getActiveSheet();
+  const sheet = findTargetSheet(ss, targetMonthAbbr);
+  if (!sheet) {
+    Logger.log('ไม่พบชีตประจำเดือนนี้ (' + targetMonthAbbr + ') กรุณาตรวจสอบชื่อชีตใน Google Sheets ค่ะ');
+    return;
+  }
 
   const lastRow = sheet.getLastRow();
   let targetRows = [];
@@ -404,4 +418,99 @@ function sendYesterdayLineReport() {
   };
 
   getAllRecipients().forEach(sendPayload);
+}
+
+/**
+ * หาชีตประจำเดือนเป้าหมาย
+ * (ใช้ได้ทั้ง Trigger รันเบื้องหลัง และ รันด้วยมือ)
+ *
+ * ลำดับการเลือก:
+ *  1. ชีตที่ชื่อตรงเดือนของ "เมื่อวาน" และ มีข้อมูลวันที่เมื่อวานอยู่จริง
+ *     (เช่น รัน 1 ต.ค. แต่ยังไม่มีชีต ต.ค.69 -> จะเลือก ก.ย.69 ที่มีข้อมูล 30/9)
+ *  2. ชีตเดือนปัจจุบัน ที่มีข้อมูลเมื่อวาน
+ *  3. ชีตที่ชื่อตรงเดือน (ตามลำดับที่มีในไฟล์)
+ *  4. สำรอง -> active sheet
+ *
+ * @param {SpreadsheetApp.Spreadsheet} ss
+ * @param {string} monthAbbr ชื่อเดือนแบบไทย เช่น "ก.ย."
+ * @return {Sheet|null}
+ */
+function findTargetSheet(ss, monthAbbr) {
+  // สำรองข้อมูลเดือนไทย กันกรณี locale ของ Utilities.formatDate ไม่ตรง
+  const THAI_MONTHS = [
+    'ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.',
+    'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'
+  ];
+  const abbr = monthAbbr || THAI_MONTHS[new Date().getMonth()] || '';
+  const curMonthAbbr = THAI_MONTHS[new Date().getMonth()] || '';
+
+  const sheets = ss.getSheets();
+  let fallbackAbbr = null;   // ชีตที่ชื่อตรงเดือนเมื่อวาน (ไม่เช็ควัน)
+  let fallbackCur = null;    // ชีตที่ชื่อตรงเดือนปัจจุบัน (ไม่เช็ควัน)
+
+  for (let i = 0; i < sheets.length; i++) {
+    const name = sheets[i].getName();
+    if (!name.includes(abbr) && !name.includes(curMonthAbbr)) continue;
+
+    // 1. ชีตที่มีข้อมูล "เมื่อวาน" จริง -> ใช้ทันที (สำคัญตอนข้ามเดือน)
+    if (name.includes(abbr) && sheetHasDate(sheets[i], abbr)) {
+      return sheets[i];
+    }
+
+    // 2. ชีตเดือนปัจจุบันที่มีข้อมูล
+    if (name.includes(curMonthAbbr) && sheetHasDate(sheets[i], curMonthAbbr)) {
+      if (!fallbackCur) fallbackCur = sheets[i];
+      continue;
+    }
+
+    // เก็บสำรองไว้ก่อน
+    if (name.includes(abbr) && !fallbackAbbr) fallbackAbbr = sheets[i];
+    if (name.includes(curMonthAbbr) && !fallbackCur) fallbackCur = sheets[i];
+  }
+
+  // ส่งออกตามลำดับความสำคัญ
+  if (fallbackCur) return fallbackCur;
+  if (fallbackAbbr) return fallbackAbbr;
+
+  // สำรอง: ยังไม่มีชีตเดือนนี้ -> ใช้ active sheet (กัน error กรณีรันมือ)
+  try {
+    return ss.getActiveSheet();
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * ตรวจสอบว่าชีตหนึ่ง มีข้อมูลวันที่ที่ตรงกับเดือนที่ระบุหรือไม่
+ * (อ่านคอลัมน์ A แล้วเทียบเลขเดือน เช่น "30/9", "30/9/2026", Date ที่เป็นเดือน 9)
+ * @param {Sheet} sheet
+ * @param {string} abbr ชื่อเดือนแบบไทย เช่น "ก.ย."
+ * @return {boolean}
+ */
+function sheetHasDate(sheet, abbr) {
+  const THAI_MONTHS = [
+    'ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.',
+    'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'
+  ];
+  const targetMonth = THAI_MONTHS.indexOf(abbr) + 1; // 1-12
+  if (targetMonth <= 0) return false;
+
+  try {
+    const last = sheet.getLastRow();
+    if (last < 2) return false;
+
+    const aCol = sheet.getRange(2, 1, last - 1, 1).getValues();
+    for (let i = 0; i < aCol.length; i++) {
+      const cv = aCol[i][0];
+      if (cv instanceof Date) {
+        if (cv.getMonth() + 1 === targetMonth) return true;
+      } else if (cv !== null && cv !== undefined) {
+        const m = String(cv).trim().match(/^\d{1,2}\/(\d{1,2})(?:\/\d{2,4})?/);
+        if (m && parseInt(m[1], 10) === targetMonth) return true;
+      }
+    }
+    return false;
+  } catch (e) {
+    return false;
+  }
 }

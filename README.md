@@ -70,7 +70,7 @@ LINE Platform ───► Cloudflare Worker (bridge) ──► Google Apps Scri
 
 | Property | default | ความหมาย |
 |----------|---------|----------|
-| `GEMINI_MODEL` | `gemini-3.5-flash-lite` | ชื่อรุ่น Gemini (เช็ครุ่นจริงใน AI Studio) |
+| `GEMINI_MODEL` | `gemini-3.5-flash-lite` | ชื่อรุ่น Gemini หลัก (เช็ครุ่นจริงใน AI Studio) — หากตัวหลักแน่น/ปิด ระบบจะสลับใช้รุ่นสำรองอัตโนมัติ: `3.6-flash` → `3.7-flash` → `3.5-flash` → `3.5-flash-lite` → `3.1-flash-lite` |
 | `WAIT_MINUTES` | `3` | รอเท่าไรจึงเริ่มประมวลผล (ให้ภาพมาครบชุด) |
 | `GAP_MINUTES` | `10` | รูปจากคนเดียวกันห่างกันไม่เกินนี้ = เหตุการณ์เดียวกัน |
 | `TZ` | `Asia/Bangkok` | เขตเวลาที่ใช้ |
@@ -170,13 +170,15 @@ Apps Script → **ล็อค (Trigger)** → **Add Trigger**:
 | ชีท | หัวคอลัมน์ |
 |-----|-----------|
 | `ผู้รับผิดชอบรถ` | `line_id` (Key) ｜ `name` ｜ `plate` |
-| `เหตุการณ์` | `event_id` (Key) ｜ `timestamp` ｜ `event_time` ｜ `event_type` ｜ `sender_line_id` ｜ `plate` ｜ `mileage_km` ｜ `error_note` |
-| `เติมน้ำมัน` | `event_id` (Key) ｜ `fuel_before_pct` ｜ `fuel_after_pct` ｜ `amount_baht` ｜ `price_per_liter` ｜ `liters` ｜ `district` ｜ `receipt_url` ｜ `error_note` |
+| `เหตุการณ์` | `event_id` (Key) ｜ `timestamp` ｜ `event_time` ｜ `event_type` ｜ `sender_line_id` ｜ `plate` ｜ `mileage_km` ｜ `fuel_pct` ｜ `error_note` |
+| `เติมน้ำมัน` | `event_id` (Key) ｜ `fuel_before_pct` ｜ `fuel_after_pct` ｜ `amount_baht` ｜ `price_per_liter` ｜ `liters` ｜ `district` ｜ `receipt_url` ｜ `error_note` ｜ `gauge_before_url` ｜ `gauge_after_url` |
 | `Log` | `message_id` (Key) ｜ `sender_line_id` ｜ `event_id` ｜ `status` ｜ `error_log` ｜ `received_at` |
 
 - `event_type`: `เข้า` / `ออก` / `เติมน้ำมัน`
+- `fuel_pct`: ระดับน้ำมันของเหตุการณ์นั้น (เติม = ค่าหลังเติม, เข้า/ออก = ค่าเกจที่อ่านได้) — กรอกอัตโนมัติถ้าภาพเห็นเกจ
 - คอลัมน์ตัวเลขที่อ่านไม่ได้ → **เว้นว่าง** (ห้ามใส่ `-` เพื่อให้ AppSheet เดาประเภทได้)
 - `Log.status`: `queued` → `done` / `error` ; `message_id` กันบันทึกซ้ำ
+- `error_log`: error ถ้ามี หรือ **สรุปผลวิเคราะห์รายภาพ** เช่น `img1:odometer,มิล62534 | img2:receipt,บิล1000 | img3:fuel_gauge,%50` (ใช้วินิจฉัยว่าอ่านรูปใดได้/ไม่ได้)
 
 ---
 
@@ -187,10 +189,12 @@ Apps Script → **ล็อค (Trigger)** → **Add Trigger**:
 | ระบุรถ | 1) ใช้ `ผู้รับผิดชอบรถ` ตาม line_id 2) ถ้าไมล์ไม่ตรงรถประจำ → เทียบประวัติไมล์คันอื่น |
 | แยกเข้า/ออก | สลับกับเหตุการณ์ล่าสุดของคัน (ถ้าไม่มีประวัติ: ก่อนเที่ยง=ออก / หลังเที่ยง=เข้า) |
 | รูปเกจ 1 ใบ | ถือเป็นภาพ "หลังเติม" |
+| ระดับน้ำมัน (%) | เก็บทุกเหตุการณ์: กรณีเติม = ค่าหลังเติม, เข้า/ออก = ค่าเกจที่อ่านได้; อ่านจากทุกภาพที่เห็นเข็ม (รวมรูปแผงมีทั้งไมล์+เกจ) |
+| upload รูป | บิล + เกจก่อน/หลังเติม ขึ้น Drive ทั้งหมด (ชื่อ ทะเบียน_เวลา, ต่อท้าย _before/_after) เก็บ URL ในชีท เติมน้ำมัน |
 | เวลาบิล | ใช้เวลาบนใบเสร็จ → แปลงเป็น ค.ศ.; อ่านไม่ได้ใช้เวลา LINE |
 | ชื่อไฟล์บิลใน Drive | `ทะเบียน_ปีคศ.เดือนวัน_ชั่วโมงนาที` เช่น `6956_20260923_1539.jpg` |
 | บันทึก error | ลงคอลัมน์ `error_note` / `error_log` เสมอ (แสดงเหตุผลจริง เช่น error จาก Gemini) |
-| โซนเวลา/ฟอร์แมต | `setupSheet_()` รันอัตโนมัติครั้งแรก: ตั้งชีตเป็น Asia/Bangkok + ฟอร์แมตวันที่เป็น `dd/MM/yyyy HH:mm:ss` |
+| โซนเวลา/ฟอร์แมต | `setupSheet_()` รันอัตโนมัติครั้งแรก: ตั้งชีตเป็น Asia/Bangkok + ฟอร์แมตวันที่เป็น `dd/MM/yyyy HH:mm:ss`; เพิ่มคอลัมน์ `fuel_pct` ในชีท เหตุการณ์ ให้อัตโนมัติถ้ายังไม่มี |
 
 ---
 
@@ -212,7 +216,7 @@ Apps Script → **ล็อค (Trigger)** → **Add Trigger**:
 | LINE Verify ไม่ผ่าน / webhook ไม่เข้า | Worker ยังไม่ deploy หรือลง URL ผิด | เปิด URL worker ใน browser ต้องเห็น `{"success":true}` (ถ้าเห็น error เก่า = deploy ไม่สำเร็จ) |
 | ไม่มีข้อมูลเข้า Sheets | Deploy GAS เป็นแบบใครๆ / webhook ชี้ผิด | Web app + Access=ทุกคน; webhook ชี้ URL Worker |
 | Log = `error` + `ดาวน์โหลดรูปไม่สำเร็จ (400) Bad request` | **token ผิดแชนแนล/ผิดบอท** | ใช้ token ของแชนแนลเดียวกับที่ตั้ง webhook (ดู 2.7); ตรวจได้โดยโทร bot/info แล้วเปรียบเทียบชื่อบอท |
-| `Gemini error (503) high demand` | Gemini ติดคิวชั่วคราว | รอแล้วส่งรูปใหม่ (ไม่ใช่บักระบบ) |
+| `Gemini error (503) high demand` | Gemini ติดคิวชั่วคราว | ระบบลองซ้ำ + สลับโมเดลสำรองอัตโนมัติ; ถ้ายังพลาดส่งรูปใหม่ (จะเห็นผลวิเคราะห์รายภาพใน `Log.error_log`) |
 | เวลาในชีทผิดโซน | ชีท timezone เดิมไม่ใช่ BKK | โค้ดใหม่ตั้งอัตโนมัติครั้งแรก; ตรวจ File → Settings → Timezone = Bangkok |
 | รูปภาพมาไม่ครบเป็นเหตุการณ์เดียว | ส่งห่างกันเกิน `GAP_MINUTES` | เพิ่ม `GAP_MINUTES` (เช่น 15) |
 | ข้อมูลช้าเกินคาด | Trigger 1 นาที + WAIT 3 นาที | ลด `WAIT_MINUTES` ถ้าอยากได้ไวขึ้น |

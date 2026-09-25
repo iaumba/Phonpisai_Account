@@ -169,13 +169,22 @@ function processEventGroup_(rows) {
   // ---- รวม/เลือกผลวิเคราะห์ ----
   var mileage = null;
   var fuelVals = [];        // ค่า % จากภาพเกจ
+  var fuelReadings = [];    // จับคู่ค่า % กับ index ของภาพต้นทาง (ใช้ upload ภาพเกจ)
   var receipt = null;       // ข้อมูลจากใบเสร็จ
   var hasReceipt = false;
   var errorNote = [];
 
-  results.forEach(function (res) {
+  results.forEach(function (res, idx) {
     var a = res.analysis || {};
     var type = String(a.image_type || '').toLowerCase();
+
+    // เก็บระดับน้ำมันจากทุกภาพที่อ่านค่าได้ (รวมรูปแผงไมล์+เข็ม, ไม่จำกัดเฉพาะภาพเกจ)
+    if (type.indexOf('unknown') < 0 &&
+        a.fuel_percent !== null && a.fuel_percent !== undefined && !isNaN(a.fuel_percent)) {
+      var pctV = Math.round(Number(a.fuel_percent));
+      fuelVals.push(pctV);
+      fuelReadings.push({ pct: pctV, resIndex: idx });
+    }
 
     if (type.indexOf('receipt') >= 0 || type.indexOf('บิล') >= 0) {
       hasReceipt = true;
@@ -184,11 +193,6 @@ function processEventGroup_(rows) {
       }
       if (a.mileage_km !== null && a.mileage_km !== undefined && !isNaN(a.mileage_km)) {
         mileage = Number(a.mileage_km);
-      }
-    } else if (type.indexOf('fuel') >= 0 || type.indexOf('gauge') >= 0 ||
-               type.indexOf('เข็ม') >= 0 || type.indexOf('เกจ') >= 0) {
-      if (a.fuel_percent !== null && a.fuel_percent !== undefined && !isNaN(a.fuel_percent)) {
-        fuelVals.push(Math.round(Number(a.fuel_percent)));
       }
     } else if (type.indexOf('odometer') >= 0 || type.indexOf('ไมล์') >= 0) {
       if (a.mileage_km !== null && a.mileage_km !== undefined && !isNaN(a.mileage_km)) {
@@ -201,6 +205,17 @@ function processEventGroup_(rows) {
       errorNote.push(res.analysis && res.analysis.error ? String(res.analysis.error) : 'ไม่รู้จักประเภทภาพ');
     }
   });
+
+  // ---- สรุปผลวิเคราะห์รายภาพ (บันทึกลง Log.error_log เพื่อตรวจว่าภาพไหนอ่านอะไรได้) ----
+  var imageDetail = results.map(function (res, i) {
+    var a = res.analysis || {};
+    var bits = ['img' + (i + 1) + ':' + String(a.image_type || 'unknown')];
+    if (a.mileage_km !== null && a.mileage_km !== undefined && !isNaN(a.mileage_km)) bits.push('มิล' + Number(a.mileage_km));
+    if (a.fuel_percent !== null && a.fuel_percent !== undefined && !isNaN(a.fuel_percent)) bits.push('%' + Math.round(Number(a.fuel_percent)));
+    if (a.receipt && a.receipt.amount_baht) bits.push('บิล' + String(a.receipt.amount_baht));
+    if (a.error) bits.push('ERR:' + String(a.error).slice(0, 60));
+    return bits.join(',');
+  }).join(' | ');
 
   // เวลาจากบิล (แปลงเป็น ค.ศ.) -> ใช้เป็น event_time
   if (hasReceipt && receipt) {
@@ -229,9 +244,22 @@ function processEventGroup_(rows) {
     if (inOut.error) errorNote.push(inOut.error);
   }
 
+  // ---- ค่า fuel_pct ของเหตุการณ์นี้ (เก็บทุกรายการ เข้า/ออก/เติม) ----
+  var fuelPct = null;
+  if (fuelVals.length > 0) {
+    if (eventType === 'เติมน้ำมัน') {
+      fuelPct = Math.max.apply(null, fuelVals);
+    } else {
+      fuelPct = fuelVals[fuelVals.length - 1];
+    }
+  }
+
   // ---- เขียนชีท เหตุการณ์ ----
   var eventId = Utilities.getUuid();
   var eventTypeFinal = eventType;
+  if (eventType === 'เติมน้ำมัน' && fuelVals.length === 1) {
+    errorNote.push('ภาพเกจก่อนเติมอ่านระดับน้ำมันไม่ได้ (ได้แค่หลังเติม)');
+  }
   var errorFinal = errorNote.join(' | ');
 
   writeEventRow_({
@@ -242,17 +270,34 @@ function processEventGroup_(rows) {
     senderLineId: sender,
     plate: vehicle.plate,
     mileage: mileage,
+    fuelPct: fuelPct,
     errorNote: errorFinal + (vehicle.error ? ' | ' + vehicle.error : '')
   });
 
-  // ---- เติมน้ำมัน: เขียนชีท เติมน้ำมัน + copy บิลไป Drive ----
+  // ---- เติมน้ำมัน: เขียนชีท เติมน้ำมัน + copy รูปเกจ/บิลไป Drive ----
   if (eventTypeFinal === 'เติมน้ำมัน') {
     var beforePct = null, afterPct = null;
+    var gaugeBeforeUrl = '', gaugeAfterUrl = '';
+
     if (fuelVals.length >= 2) {
-      beforePct = Math.min(fuelVals[0], fuelVals[1]);
-      afterPct = Math.max(fuelVals[0], fuelVals[1]);
+      beforePct = Math.min.apply(null, fuelVals);
+      afterPct = Math.max.apply(null, fuelVals);
+      var minIdx = fuelVals.indexOf(beforePct);
+      var maxIdx = fuelVals.indexOf(afterPct);
+      var beforeO = fuelReadings[minIdx];
+      var afterO = fuelReadings[maxIdx];
+      if (beforeO && results[beforeO.resIndex] && results[beforeO.resIndex].blob) {
+        gaugeBeforeUrl = uploadImageToDrive_(results[beforeO.resIndex].blob, vehicle.plate, eventTime, '_before');
+      }
+      if (afterO && results[afterO.resIndex] && results[afterO.resIndex].blob) {
+        gaugeAfterUrl = uploadImageToDrive_(results[afterO.resIndex].blob, vehicle.plate, eventTime, '_after');
+      }
     } else if (fuelVals.length === 1) {
       afterPct = fuelVals[0];
+      var onlyO = fuelReadings[0];
+      if (onlyO && results[onlyO.resIndex] && results[onlyO.resIndex].blob) {
+        gaugeAfterUrl = uploadImageToDrive_(results[onlyO.resIndex].blob, vehicle.plate, eventTime, '_after');
+      }
     }
 
     var fuelVars = {};
@@ -273,13 +318,15 @@ function processEventGroup_(rows) {
       liters: fuelVars.liters,
       district: fuelVars.district || '',
       receiptUrl: fuelVars.receiptUrl || '',
+      gaugeBeforeUrl: gaugeBeforeUrl,
+      gaugeAfterUrl: gaugeAfterUrl,
       errorNote: ''
     });
   }
 
   // ---- อัปเดต Log -> done ----
   rows.forEach(function (r) {
-    updateLogStatusAndEventId_(r.rowIdx, 'done', eventId, '');
+    updateLogStatusAndEventId_(r.rowIdx, 'done', eventId, imageDetail);
   });
 }
 // ============================================================================
@@ -336,6 +383,9 @@ function setupSheet_() {
   if (_sheetSetupChecked) return;
   _sheetSetupChecked = true;
 
+  ensureEventHeader_();
+  ensureFuelHeader_();
+
   var props = PropertiesService.getScriptProperties();
   if (props.getProperty('SHEET_SETUP_DONE') === '1') return;
 
@@ -360,6 +410,43 @@ function setupSheet_() {
   props.setProperty('SHEET_SETUP_DONE', '1');
 }
 
+/** เพิ่มคอลัมน์ fuel_pct ในชีท เหตุการณ์ (แทรกหน้า error_note) ถ้ายังไม่มี */
+function ensureEventHeader_() {
+  var evSheet = getEventsSheet_();
+  if (!evSheet) return;
+  var lc = evSheet.getLastColumn();
+  if (lc < 1) return;
+  var headers = evSheet.getRange(1, 1, 1, lc).getValues()[0];
+  for (var i = 0; i < headers.length; i++) {
+    if (String(headers[i] || '').trim().toLowerCase() === 'fuel_pct') return;
+  }
+  var errIdx = -1;
+  for (var j = 0; j < headers.length; j++) {
+    if (String(headers[j] || '').trim().toLowerCase() === 'error_note') { errIdx = j; break; }
+  }
+  if (errIdx >= 0) {
+    evSheet.insertColumnBefore(errIdx + 1);
+    evSheet.getRange(1, errIdx + 1).setValue('fuel_pct');
+  } else {
+    evSheet.getRange(1, lc + 1).setValue('fuel_pct');
+  }
+}
+
+/** เพิ่มคอลัมน์ gauge_before_url / gauge_after_url ในชีท เติมน้ำมัน อัตโนมัติ ถ้ายังไม่มี */
+function ensureFuelHeader_() {
+  var fuelSheet = getFuelSheet_();
+  if (!fuelSheet) return;
+  var lc = fuelSheet.getLastColumn();
+  if (lc < 1) return;
+  var headers = fuelSheet.getRange(1, 1, 1, lc).getValues()[0];
+  var has = {};
+  headers.forEach(function (h) { has[String(h || '').trim().toLowerCase()] = true; });
+  if (has['gauge_before_url']) return;
+  var col = lc + 1;
+  fuelSheet.getRange(1, col).setValue('gauge_before_url');
+  fuelSheet.getRange(1, col + 1).setValue('gauge_after_url');
+}
+
 /** แผนที่ line_id -> { name, plate } */
 function getVehiclesMap_() {
   var map = {};
@@ -381,7 +468,7 @@ function getEventsByPlate_(plate) {
   var sheet = getEventsSheet_();
   if (!sheet || sheet.getLastRow() < 2) return rows;
 
-  var data = sheet.getRange(2, 1, sheet.getLastRow() - 1, 8).getValues();
+  var data = sheet.getRange(2, 1, sheet.getLastRow() - 1, 9).getValues();
   data.forEach(function (r) {
     if (!r[0]) return;
     if (String(r[5] || '').trim() !== String(plate).trim()) return;
@@ -393,7 +480,8 @@ function getEventsByPlate_(plate) {
       sender: String(r[4] || '').trim(),
       plate: String(r[5]).trim(),
       mileage: toNumOrNull_(r[6]),
-      error: String(r[7] || '').trim()
+      fuelPct: toNumOrNull_(r[7]),
+      error: String(r[8] || '').trim()
     });
   });
 
@@ -541,6 +629,7 @@ function writeEventRow_(o) {
     o.senderLineId,
     o.plate,
     o.mileage === null || o.mileage === undefined ? '' : Number(o.mileage),
+    o.fuelPct === null || o.fuelPct === undefined ? '' : Number(o.fuelPct),
     o.errorNote || ''
   ]);
 }
@@ -557,7 +646,9 @@ function writeFuelRow_(o) {
     o.liters === null || o.liters === undefined ? '' : Number(o.liters),
     String(o.district || ''),
     String(o.receiptUrl || ''),
-    String(o.errorNote || '')
+    String(o.errorNote || ''),
+    String(o.gaugeBeforeUrl || ''),
+    String(o.gaugeAfterUrl || '')
   ]);
 }
 // ============================================================================
@@ -593,7 +684,7 @@ function analyzeImageWithGemini_(blob, mime) {
     '{',
     '  "image_type": "odometer" | "fuel_gauge" | "receipt" | "unknown",',
     '  "mileage_km": จำนวนเต็ม (เฉพาะรูปเลขไมล์) หรือ null',
-    '  "fuel_percent": จำนวนเต็ม 0-100 โดยประมาณตำแหน่งเข็มระหว่าง E กับ F (เฉพาะรูปเกจน้ำมัน) หรือ null',
+    '  "fuel_percent": จำนวนเต็ม 0-100 โดยประมาณตำแหน่งเข็มระหว่าง E กับ F (อ่านเมื่อเห็นเข็มน้ำมัน/เกจชัดในภาพ รวมถึงรูปแผงที่มีทั้งไมล์+เกจด้วย) หรือ null',
     '  "receipt": { "date_text": "วันที่บนบิล เช่น 23/09/2026", "time_text": "เวลาวางมือจ่าย เช่น 15:39",',
     '               "amount_baht": ตัวเลขจำนวนเงิน, "price_per_liter": ตัวเลข, "liters": ตัวเลข,',
     '               "district": "อำเภอหรือที่ตั้งของปั้ม", "plate_text": "ทะเบียนรถถ้ามี" }',
@@ -615,19 +706,61 @@ function analyzeImageWithGemini_(blob, mime) {
     }
   };
 
-  var url = 'https://generativelanguage.googleapis.com/v1beta/models/' +
-            encodeURIComponent(getConfig_().GEMINI_MODEL) + ':generateContent?key=' + encodeURIComponent(apiKey);
+  // ลำดับโมเดลที่ลอง: ตัวที่ตั้งใน GEMINI_MODEL ก่อน แล้วเผื่อโมเดลสำรองถ้าตัวนั้นแน่น/ไม่มีแล้ว
+  var fallbackModels = [
+    'gemini-3.6-flash',
+    'gemini-3.7-flash',
+    'gemini-3.5-flash',
+    'gemini-3.5-flash-lite',
+    'gemini-3.1-flash-lite'
+  ];
+  var modelList = [];
+  var pushModel = function (m) {
+    m = String(m || '').trim();
+    if (m && modelList.indexOf(m) < 0) modelList.push(m);
+  };
+  pushModel(getConfig_().GEMINI_MODEL);
+  fallbackModels.forEach(pushModel);
 
-  var res = UrlFetchApp.fetch(url, {
-    method: 'post',
-    contentType: 'application/json',
-    payload: JSON.stringify(payload),
-    muteHttpExceptions: true
-  });
+  var apiBase = 'https://generativelanguage.googleapis.com/v1beta/models/';
+  var keyParam = '?key=' + encodeURIComponent(apiKey);
+  var res = null;
+  var lastErr = null;
+  var lastErrorText = '';
+  var ok = false;
 
-  if (res.getResponseCode() !== 200) {
-    throw new Error('Gemini error (' + res.getResponseCode() + '): ' + res.getContentText());
+outer:
+  for (var mi = 0; mi < modelList.length && !ok; mi++) {
+    var model = modelList[mi];
+    var url = apiBase + encodeURIComponent(model) + ':generateContent' + keyParam;
+
+    // ลองซ้ำ 2 รอบต่อโมเดล (ห่าง 5 วิ) แล้วค่อยสลับโมเดลถัดไป
+    for (var attempt = 1; attempt <= 2; attempt++) {
+      try {
+        res = UrlFetchApp.fetch(url, {
+          method: 'post',
+          contentType: 'application/json',
+          payload: JSON.stringify(payload),
+          muteHttpExceptions: true
+        });
+        lastErr = null;
+      } catch (e) {
+        res = null;
+        lastErr = e;
+      }
+
+      var code = res ? res.getResponseCode() : 0;
+      if (code === 200) { ok = true; break outer; }
+
+      lastErrorText = 'Gemini error (' + code + '): ' + (res ? res.getContentText() : String(lastErr || 'NA'));
+
+      if (code === 404 || code === 410) break;           // โมเดลนี้ไม่มี/ปิดแล้ว -> ข้าม
+      if (code !== 503 && code !== 429) throw new Error(lastErrorText); // error อื่น -> หยุด
+      Utilities.sleep(5000);                              // 503/429 -> รอ 5 วิ ลองใหม่
+    }
   }
+
+  if (!ok) throw new Error(lastErrorText + ' [ลอง ' + modelList.length + ' โมเดลแล้ว]');
 
   var json = JSON.parse(res.getContentText());
   var text = json.candidates && json.candidates[0] && json.candidates[0].content &&
@@ -644,11 +777,32 @@ function analyzeImageWithGemini_(blob, mime) {
   }
 }
 
-/** คัดลอกรูปบิล (ไฟล์แรกที่เป็นบิล) ไป Google Drive พร้อมเปลี่ยนชื่อ */
-function uploadReceiptToDrive_(results, plate, eventTime) {
+/** อัปโหลด blob ภาพใดๆ ขึ้น Drive: ชื่อ ทะเบียน_เวลา[suffix].ext */
+function uploadImageToDrive_(blob, plate, eventTime, suffix) {
   var folderId = ((getProps_().FOLDER_ID) || '').trim();
   if (!folderId) throw new Error('ไม่พบ FOLDER_ID ใน ScriptProperties');
+  if (!blob) return '';
 
+  var folder;
+  try { folder = DriveApp.getFolderById(folderId); }
+  catch (fErr) { throw new Error('ไม่พบโฟลเดอร์ FOLDER_ID'); }
+
+  var plateName = normalizePlate_(plate);
+  var dt = eventTime instanceof Date ? eventTime : new Date();
+  var fileName = plateName + '_' + Utilities.formatDate(dt, getConfig_().TZ, 'yyyyMMdd_HHmm') + (suffix || '');
+
+  var ext = 'jpg';
+  var mime = blob.getContentType() || '';
+  if (mime.indexOf('png') >= 0) ext = 'png';
+  else if (mime.indexOf('gif') >= 0) ext = 'gif';
+  else if (mime.indexOf('webp') >= 0) ext = 'webp';
+
+  var file = folder.createFile(blob).setName(fileName + '.' + ext);
+  return file.getUrl();
+}
+
+/** คัดลอกรูปบิล (ไฟล์แรกที่เป็นบิล) ไป Google Drive พร้อมเปลี่ยนชื่อ */
+function uploadReceiptToDrive_(results, plate, eventTime) {
   if (!results || results.length === 0) return '';
 
   var receiptIndex = -1;
@@ -659,23 +813,7 @@ function uploadReceiptToDrive_(results, plate, eventTime) {
   }
   if (receiptIndex < 0 || !results[receiptIndex].blob) return '';
 
-  var folder;
-  try { folder = DriveApp.getFolderById(folderId); }
-  catch (fErr) { throw new Error('ไม่พบโฟลเดอร์ FOLDER_ID'); }
-
-  var plateName = normalizePlate_(plate);
-  var dt = eventTime instanceof Date ? eventTime : new Date();
-  var fileName = plateName + '_' + Utilities.formatDate(dt, getConfig_().TZ, 'yyyyMMdd_HHmm');
-
-  var ext = 'jpg';
-  var mime = results[receiptIndex].blob.getContentType() || '';
-  if (mime.indexOf('png') >= 0) ext = 'png';
-  else if (mime.indexOf('gif') >= 0) ext = 'gif';
-  else if (mime.indexOf('webp') >= 0) ext = 'webp';
-
-  var finalName = fileName + '.' + ext;
-  var file = folder.createFile(results[receiptIndex].blob).setName(finalName);
-  return file.getUrl();
+  return uploadImageToDrive_(results[receiptIndex].blob, plate, eventTime, '');
 }
 
 function normalizePlate_(plate) {
@@ -770,4 +908,13 @@ function installTimeTrigger() {
 function testEnqueueDummy() {
   addLogRow_('TEST_MSG_001', 'U_TEST_SENDER', null, 'queued', '', new Date(Date.now() - 10 * 60000));
   Logger.log('เพิ่มแถวทดสอบเรียบร้อย');
+}
+
+/**
+ * ปุ่มสำหรับกดด้วยมือ: ตั้งค่า/สร้างคอลัมน์อัตโนมัติในสเปรดชีต
+ * (โค้ดจริงจะเรียก setupSheet_() เองตอนมีเหตุการณ์ — ตัวนี้ไว้กดให้พร้อมก่อน deploy)
+ */
+function setupSheet() {
+  setupSheet_();
+  Logger.log('สร้าง/ตรวจคอลัมน์เรียบร้อย (fuel_pct, gauge_before_url, gauge_after_url)');
 }

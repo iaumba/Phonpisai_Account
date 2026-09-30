@@ -1,0 +1,15 @@
+# Node / clasp
+node_modules/
+.clasprc.json
+.clasprc.json.tmp
+
+# ไฟล์ที่ generate โดย push.ps1 (สำเนาโค้ดจากโฟลเดอร์หลัก)
+clasp-cash/Code.gs
+clasp-payment/Code.gs
+
+# Excel lock files
+~$*.xlsx
+
+# OS
+Thumbs.db
+.DS_Store

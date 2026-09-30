@@ -45,15 +45,38 @@ function sendYesterdayLineReport() {
   // รูปแบบวันที่ d/M/yyyy สำหรับแสดงในหัวข้อรายงาน (เช่น 16/9/2026)
   const displayYesterdayStr = `${yDay}/${yMonth}/${yYearCE}`;
 
-  // 2. เข้าถึง Google Sheets แผ่นงานปัจจุบัน
+  // เดือนแบบไทยสำหรับค้นหาชีต เช่น "ก.ย."
+  const THAI_MONTHS_FOR_SHEET = [
+    'ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.',
+    'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'
+  ];
+  const yMonthAbbr = THAI_MONTHS_FOR_SHEET[yMonth - 1] || '';
+
+  // 2. เข้าถึง Google Sheets: เลือกชีตประจำเดือนเป้าหมาย
+  //    (Trigger รันเบื้องหลังไม่มี "active sheet" -> getActiveSheet() อาจคืนชีตแรก เช่น "ตาราง Pivot 1")
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sheet = ss.getActiveSheet();
+  const sheet = findTargetSheet(ss, yMonthAbbr, yDay, yMonth, now);
+  if (!sheet) {
+    Logger.log('ไม่พบชีตประจำเดือนนี้ (' + yMonthAbbr + ') กรุณาตรวจสอบชื่อชีตใน Google Sheets ค่ะ');
+    return;
+  }
   const data = sheet.getDataRange().getValues();
   const sheetUrl = ss.getUrl();
 
-  // ดึงหมายเหตุ/ยอดค้างจ่าย จาก Cell I1
-  const cellI1Value = sheet.getRange('I1').getValue();
-  const noteText = cellI1Value ? String(cellI1Value).trim() : '-';
+  // ยอดค้างจ่ายทั้งหมดจาก Cell I1 (เช่น "ค้างจ่าย   511,105")
+  // อ่านจากชีตที่ใช้รายงานก่อน หากว่างให้เช็คชีต "เดือนก่อนหน้า" อีก 1 ชีต (คาบเกี่ยวต้นเดือน)
+  const prevMonthNum = yMonth === 1 ? 12 : yMonth - 1;
+  const prevMonthAbbr = THAI_MONTHS_FOR_SHEET[prevMonthNum - 1];
+  const outstandingData = findOutstandingWithSource(ss, sheet, prevMonthAbbr);
+
+  let noteText = '-';
+  let outstandingStr = '-';
+  let outstandingLabel = '📌 ยอดค้างจ่ายทั้งหมด';
+  if (outstandingData) {
+    noteText = outstandingData.text;
+    outstandingStr = '฿' + formatNumber(outstandingData.amount);
+    outstandingLabel = '📌 ยอดค้างจ่ายทั้งหมด (' + outstandingData.source + ')';
+  }
 
   // 3. แยกอาร์เรย์เก็บข้อมูล 2 กลุ่ม: จ่ายสด vs บัญชีอื่นๆ
   const cashItems = [];
@@ -120,6 +143,8 @@ function sendYesterdayLineReport() {
       totalOther: totalOtherPaid,
       totalAll: totalCashPaid + totalOtherPaid,
       note: noteText,
+      outstanding: outstandingStr,
+      outstandingLabel: outstandingLabel,
       sheetUrl: sheetUrl
     };
 
@@ -161,6 +186,8 @@ function createReportFlexBubble(data) {
   const totalOther = safeData.totalOther || 0;
   const dateStr = safeData.dateStr || '-';
   const note = safeData.note || '-';
+  const outstanding = safeData.outstanding || '-';
+  const outstandingLabel = safeData.outstandingLabel || '📌 ยอดค้างจ่ายทั้งหมด';
   const sheetUrl = safeData.sheetUrl || 'https://docs.google.com/spreadsheets';
 
   // ฟังก์ชันย่อยสำหรับสร้างแถวรายการ
@@ -245,6 +272,16 @@ function createReportFlexBubble(data) {
           contents: [
             { type: "text", text: "🏦 เงินโอน/บัญชี", size: "xs", color: "#64748B" },
             { type: "text", text: `฿${formatNumber(totalOther)}`, size: "xs", weight: "bold", color: "#2563EB", align: "end" }
+          ]
+        },
+        { type: "separator", margin: "sm", color: "#CBD5E1" },
+        {
+          type: "box",
+          layout: "horizontal",
+          margin: "sm",
+          contents: [
+            { type: "text", text: `${outstandingLabel}`, size: "xs", weight: "bold", color: "#92400E", wrap: true },
+            { type: "text", text: `${outstanding}`, size: "sm", weight: "bold", color: "#B45309", align: "end" }
           ]
         }
       ]
@@ -349,7 +386,19 @@ function createReportFlexBubble(data) {
 }
 
 /**
+ * ฟังก์ชันช่วย: แปลงค่า Excel Serial Number (เช่น 46266) ให้เป็น Date
+ * @param {number|string} serial
+ * @return {Date|null}
+ */
+function parseExcelSerial(serial) {
+  const n = Number(serial);
+  if (isNaN(n) || n <= 0 || n > 100000) return null;
+  return new Date(Math.round((n - 25569) * 86400 * 1000)); // 25569 = 1970-01-01 - 1900-01-01
+}
+
+/**
  * ฟังก์ชันช่วย: แปลงและตรวจจับวันที่ใน Cell แบบยืดหยุ่น
+ * รองรับ: Date Object, Excel Serial, ISO (yyyy-MM-dd), d/M/yyyy, dd/MM/yyyy
  */
 function parseDateFlexible(val, defaultYear) {
   if (!val) return null;
@@ -364,6 +413,18 @@ function parseDateFlexible(val, defaultYear) {
 
   const str = String(val).trim();
   if (!str) return null;
+
+  // Excel Serial Number (เช่น "46266") -> แปลงเป็น Date
+  if (/^\d{4,5}(\.\d+)?$/.test(str)) {
+    const d = parseExcelSerial(str);
+    if (d) {
+      return {
+        day: d.getDate(),
+        month: d.getMonth() + 1,
+        year: d.getFullYear()
+      };
+    }
+  }
 
   const isoMatch = str.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
   if (isoMatch) {
@@ -395,11 +456,195 @@ function formatCellDate(cellVal, fallbackStr) {
     return `${cellVal.getDate()}/${cellVal.getMonth() + 1}`;
   }
   const str = String(cellVal).trim();
+  if (/^\d{4,5}(\.\d+)?$/.test(str)) {
+    const d = parseExcelSerial(str);
+    if (d) return `${d.getDate()}/${d.getMonth() + 1}`;
+  }
   const isoMatch = str.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
   if (isoMatch) {
     return `${parseInt(isoMatch[3], 10)}/${parseInt(isoMatch[2], 10)}`;
   }
   return str !== '' ? str : fallbackStr;
+}
+
+/**
+ * ดึงยอดค้างจ่ายจาก Cell I1 -> { amount: number|null, text: string }
+ * รองรับทั้งข้อความ "ค้างจ่าย   511,105" และตัวเลขล้วน (เช่น 732675)
+ */
+function parseOutstandingCell(cellValue) {
+  const out = { amount: null, text: '-' };
+  if (cellValue === null || cellValue === undefined || String(cellValue).trim() === '') {
+    return out;
+  }
+  out.text = String(cellValue).replace(/\s+/g, ' ').trim();
+  const m = out.text.match(/[\d,]+(?:\.\d+)?/);
+  if (m) {
+    out.amount = Number(m[0].replace(/,/g, ''));
+  } else if (typeof cellValue === 'number' && !isNaN(cellValue)) {
+    out.amount = cellValue;
+  }
+  return out;
+}
+
+/**
+ * หาชีตตามคำย่อเดือน (เช่น "ส.ค.") แล้วคืนชีตแรกที่ชื่อตรง -> Sheet|null
+ */
+function findSheetByAbbr(ss, abbr) {
+  if (!abbr) return null;
+  const sheets = ss.getSheets();
+  for (let i = 0; i < sheets.length; i++) {
+    if (sheets[i].getName().includes(abbr)) return sheets[i];
+  }
+  return null;
+}
+
+/**
+ * อ่าน Cell I1 ของชีต แล้วคืน data จาก parseOutstandingCell เฉพาะกรณีมียอดค้างจริง -> Object|null
+ */
+function readOutstandingFromSheet(sheetToRead) {
+  try {
+    if (!sheetToRead) return null;
+    const v = sheetToRead.getRange('I1').getValue();
+    const d = parseOutstandingCell(v);
+    if (d && d.amount !== null && !isNaN(d.amount)) return d;
+    return null;
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * ดึงเดือนจากชื่อชีต เช่น "ก.ย.69" -> "ก.ย.69" / "ตาราง Pivot 1" -> ""
+ */
+function getSheetMonthLabel(sheetName) {
+  const names = sheetName ? String(sheetName) : '';
+  const MON = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'];
+  for (let i = 0; i < MON.length; i++) {
+    if (names.includes(MON[i])) {
+      const yMatch = names.match(/(\d{2,4})/);
+      return yMatch ? MON[i] + yMatch[1] : MON[i];
+    }
+  }
+  return '';
+}
+
+/**
+ * หายอดค้างจ่ายจาก Cell I1: อ่านชีตที่ใช้รายงานก่อน หากว่างให้เช็คชีต "เดือนก่อนหน้า" อีก 1 ชีต
+ * (รองรับช่วงคาบเกี่ยวต้นเดือนที่ยอดค้างอาจอยู่ที่ชีตเดือนก่อนหน้า)
+ * @return {Object|null} { amount, text, source } - source คือชื่อเดือนของชีตที่มียอดค้าง
+ */
+function findOutstandingWithSource(ss, reportSheet, prevMonthAbbr) {
+  const trySheet = (sh, fallbackAbbr) => {
+    if (!sh) return null;
+    const data = readOutstandingFromSheet(sh);
+    if (!data) return null;
+    return { amount: data.amount, text: data.text, source: getSheetMonthLabel(sh.getName()) || fallbackAbbr };
+  };
+
+  const fromReport = trySheet(reportSheet, '');
+  if (fromReport) return fromReport;
+
+  const prevSheet = findSheetByAbbr(ss, prevMonthAbbr);
+  if (prevSheet && prevSheet !== reportSheet) {
+    return trySheet(prevSheet, prevMonthAbbr);
+  }
+  return null;
+}
+
+/**
+ * หาชีตประจำเดือนเป้าหมาย (ใช้ได้ทั้ง Trigger รันเบื้องหลัง และ รันด้วยมือ)
+ * 1. ชีตที่ชื่อตรงเดือนเมื่อวาน และมีข้อมูลเดือนนั้นในคอลัมน์ A
+ * 2. ชีตที่ "มีข้อมูลเดือนเป้าหมาย" จริง (เช่น 1 ต.ค. ยังไม่มี ต.ค.69 -> อ่าน ก.ย.69)
+ * 3. ชีตที่ชื่อตรงเดือนปัจจุบัน และมีข้อมูลเดือนนั้น
+ * 4. สำรอง -> active sheet
+ * @param {SpreadsheetApp.Spreadsheet} ss
+ * @param {string} monthAbbr เช่น "ก.ย."
+ * @param {number} day
+ * @param {number} month
+ * @param {Date} now
+ * @return {Sheet|null}
+ */
+function findTargetSheet(ss, monthAbbr, day, month, now) {
+  const THAI_MONTHS = [
+    'ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.',
+    'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'
+  ];
+  const nowDate = now || new Date();
+  const curMonthAbbr = THAI_MONTHS[nowDate.getMonth()] || '';
+  const curMonthNum = nowDate.getMonth() + 1;
+
+  const sheets = ss.getSheets();
+  let fallbackTarget = null;
+  let fallbackCur = null;
+  let sheetWithTargetDates = null;
+
+  for (let i = 0; i < sheets.length; i++) {
+    const name = sheets[i].getName();
+    const hasTargetMonthName = name.includes(monthAbbr);
+    const hasCurMonthName = name.includes(curMonthAbbr);
+
+    // ชีตที่ชื่อตรงเดือนเป้าหมาย และมีข้อมูลเดือนนั้น -> เลือกทันที
+    if (hasTargetMonthName && sheetHasDateColumn(sheets[i], month)) {
+      return sheets[i];
+    }
+
+    // จำชีตที่ "มีข้อมูลเดือนเป้าหมาย" ไว้แม้ชื่อจะไม่ตรง
+    if (month !== curMonthNum) {
+      if (!sheetWithTargetDates && sheetHasDateColumn(sheets[i], month)) {
+        sheetWithTargetDates = sheets[i];
+      }
+    }
+
+    if (hasCurMonthName && sheetHasDateColumn(sheets[i], curMonthNum)) {
+      if (!fallbackCur) fallbackCur = sheets[i];
+      continue;
+    }
+
+    if (hasTargetMonthName && !fallbackTarget) fallbackTarget = sheets[i];
+    if (hasCurMonthName && !fallbackCur) fallbackCur = sheets[i];
+  }
+
+  if (sheetWithTargetDates) return sheetWithTargetDates;
+  if (fallbackCur) return fallbackCur;
+  if (fallbackTarget) return fallbackTarget;
+
+  try {
+    return ss.getActiveSheet();
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * ตรวจสอบว่าชีตมีข้อมูลของเดือนเป้าหมายอยู่จริงหรือไม่ (อ่านคอลัมน์ A)
+ * @param {Sheet} sheet
+ * @param {number} targetMonth 1-12
+ * @return {boolean}
+ */
+function sheetHasDateColumn(sheet, targetMonth) {
+  try {
+    const last = sheet.getLastRow();
+    if (last < 2) return false;
+
+    const aCol = sheet.getRange(2, 1, last - 1, 1).getValues();
+    for (let i = 0; i < aCol.length; i++) {
+      const cv = aCol[i][0];
+      if (cv instanceof Date) {
+        if (cv.getMonth() + 1 === targetMonth) return true;
+      } else if (cv !== null && cv !== undefined) {
+        const s = String(cv).trim();
+        const m = s.match(/^\d{1,2}\/(\d{1,2})(?:\/\d{2,4})?/);
+        if (m && parseInt(m[1], 10) === targetMonth) return true;
+        if (/^\d{4,5}(\.\d+)?$/.test(s)) {
+          const d = parseExcelSerial(s);
+          if (d && d.getMonth() + 1 === targetMonth) return true;
+        }
+      }
+    }
+    return false;
+  } catch (e) {
+    return false;
+  }
 }
 
 /**

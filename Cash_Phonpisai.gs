@@ -1,3 +1,10 @@
+// ชื่อเดือนแบบไทย ใช้หาชีตประจำเดือน (Apps Script รองรับ Utilities.formatDate แค่ 3 พารามิเตอร์ (date, tz, format)
+// ห้ามส่ง locale ตัวที่ 4 เพราะจะพังตอน Trigger รันจริง)
+const THAI_MONTHS = [
+  'ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.',
+  'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'
+];
+
 function sendYesterdayLineReport() {
   // ฟังก์ชันช่วยแปลงตัวเลขให้มี comma (,) และคืนค่า '-' ถ้าไม่มีข้อมูล
   const formatNumber = (num) => {
@@ -32,7 +39,7 @@ function sendYesterdayLineReport() {
   const targetDayMonth = Utilities.formatDate(yesterday, 'Asia/Bangkok', 'd/M');
   const targetDayMonthFull = Utilities.formatDate(yesterday, 'Asia/Bangkok', 'dd/MM');
   const displayYesterday = Utilities.formatDate(yesterday, 'Asia/Bangkok', 'd/M/yyyy');
-  const targetMonthAbbr = Utilities.formatDate(yesterday, 'Asia/Bangkok', 'MMM', 'th_TH'); // เช่น ก.ย.
+  const targetMonthAbbr = THAI_MONTHS[yesterday.getMonth()]; // เช่น ก.ย.
 
   // 2. หาชีตประจำเดือนเป้าหมาย: จับคู่ชื่อชีต (เช่น "ก.ย.69") กับเดือนของวันเมื่อวาน
   //    * Trigger รันเบื้องหลังมักไม่มี "active sheet" (getActiveSheet() คืนชีตแรก/ว่าง)
@@ -436,11 +443,6 @@ function sendYesterdayLineReport() {
  * @return {Sheet|null}
  */
 function findTargetSheet(ss, monthAbbr) {
-  // สำรองข้อมูลเดือนไทย กันกรณี locale ของ Utilities.formatDate ไม่ตรง
-  const THAI_MONTHS = [
-    'ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.',
-    'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'
-  ];
   const abbr = monthAbbr || THAI_MONTHS[new Date().getMonth()] || '';
   const curMonthAbbr = THAI_MONTHS[new Date().getMonth()] || '';
 
@@ -488,10 +490,6 @@ function findTargetSheet(ss, monthAbbr) {
  * @return {boolean}
  */
 function sheetHasDate(sheet, abbr) {
-  const THAI_MONTHS = [
-    'ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.',
-    'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'
-  ];
   const targetMonth = THAI_MONTHS.indexOf(abbr) + 1; // 1-12
   if (targetMonth <= 0) return false;
 
